@@ -1,0 +1,221 @@
+PYTHON CODE
+
+import cv2
+import os
+import uuid
+from supabase import create_client
+from datetime import datetime
+
+# --- CONFIGURATION ---
+SUPABASE_URL = "https://yfnqsegpwdhzegnbgcli.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlmbnFzZWdwd2RoemVnbmJnY2xpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTUwNzY0NDYsImV4cCI6MjA3MDY1MjQ0Nn0.Gdlq-zdOlKa340S5H0vW7T4uS0Az2MUtPInw4i_EaME"  # Your anon key
+INVENTORY_BUCKET = "inventory"
+MATCH_BUCKET = "matches"
+TEMP_DIR = "temp"
+
+# --- SUPABASE CLIENT ---
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+os.makedirs(TEMP_DIR, exist_ok=True)
+
+# --- ORB MATCH FUNCTION ---
+def get_orb_match_score(img1_path, img2_path):
+    img1 = cv2.imread(img1_path, 0)
+    img2 = cv2.imread(img2_path, 0)
+
+    orb = cv2.ORB_create()
+    kp1, des1 = orb.detectAndCompute(img1, None)
+    kp2, des2 = orb.detectAndCompute(img2, None)
+
+    if des1 is None or des2 is None:
+        return 9999
+
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    matches = bf.match(des1, des2)
+
+    if not matches:
+        return 9999
+
+    matches = sorted(matches, key=lambda x: x.distance)
+    avg_distance = sum(m.distance for m in matches[:10]) / min(len(matches), 10)
+    return avg_distance
+
+# --- CAPTURE IMAGE ---
+def capture_image():
+    cap = cv2.VideoCapture(0)
+    ret, frame = cap.read()
+    cap.release()
+
+    if not ret:
+        raise RuntimeError("? Failed to capture image")
+
+    filename = f"{uuid.uuid4()}.jpg"
+    filepath = os.path.join(TEMP_DIR, filename)
+    cv2.imwrite(filepath, frame)
+    print(f"?? Captured: {filepath}")
+    return filepath
+
+# --- DOWNLOAD INVENTORY ---
+def download_inventory():
+    response = supabase.table("inventory").select("item_name, price, image_urls").execute()
+    inventory = []
+
+    if not response.data:
+        print("?? No inventory items found in DB.")
+        return inventory
+
+    for item in response.data:
+        name = item.get("item_name")
+        price = item.get("price", 0)
+        image_urls = item.get("image_urls", [])
+        if not image_urls:
+            print(f"?? {name} has no images, skipping.")
+            continue
+
+        for image_path in image_urls:
+            local_filename = os.path.basename(image_path)
+            local_path = os.path.join(TEMP_DIR, local_filename)
+
+            try:
+                data = supabase.storage.from_(INVENTORY_BUCKET).download(image_path)
+                with open(local_path, "wb") as f:
+                    f.write(data)
+                inventory.append((name, local_path, price))
+            except Exception as e:
+                print(f"? Failed to download {image_path}: {e}")
+
+    return inventory
+
+# --- UPLOAD MATCH & INSERT INTO CART ---
+def upload_match(item_name, captured_path, price):
+    file_id = f"{uuid.uuid4()}.jpg"
+    storage_path = f"{file_id}"
+
+    # Upload captured image to MATCH_BUCKET
+    try:
+        with open(captured_path, "rb") as f:
+            supabase.storage.from_(MATCH_BUCKET).upload(storage_path, f)
+    except Exception as e:
+        print(f"? Failed to upload matched image: {e}")
+        return
+
+    # Insert into cart table
+    try:
+        supabase.table("cart").insert({
+            "item_name": item_name,
+            "price": price,
+            "image_path": f"{MATCH_BUCKET}/{storage_path}",
+            "timestamp": datetime.now().isoformat()
+        }).execute()
+        print(f"? Added to cart: {item_name} - ?{price}")
+    except Exception as e:
+        print(f"? Failed to insert into cart: {e}")
+
+# --- MAIN ---
+def main():
+    captured_path = capture_image()
+    inventory = download_inventory()
+
+    if not inventory:
+        print("? No inventory images available for matching.")
+        return
+
+    best_score = 9999
+    best_item = None
+    best_price = 0
+
+    for name, inv_path, price in inventory:
+        score = get_orb_match_score(captured_path, inv_path)
+        print(f"?? {name} ? Score: {score}")
+        if score < best_score:
+            best_score = score
+            best_item = name
+            best_price = price
+
+    if best_item and best_score < 40:  # Threshold
+        print(f"? Match found: {best_item} (Score: {best_score})")
+        upload_match(best_item, captured_path, best_price)
+    else:
+        print("? No good match found.")
+
+if _name_ == "_main_":
+    main()
+
+-------------------------------------------------------------------------------------------
+
+SUPERBASE CODE
+
+# -- coding: utf-8 --
+"""
+SmartCart AI - Add Item to Inventory
+Author: Harsha Vardhan
+Description:
+    Captures an image from the Pi Camera or USB cam,
+    uploads it to Supabase Storage, and saves item details to the inventory table.
+"""
+
+import cv2
+import uuid
+import os
+from supabase import create_client, Client
+
+# ===== CONFIGURATION =====
+PROJECT_URL = "https://yfnqsegpwdhzegnbgcli.supabase.co"
+ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlmbnFzZWdwd2RoemVnbmJnY2xpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTUwNzY0NDYsImV4cCI6MjA3MDY1MjQ0Nn0.Gdlq-zdOlKa340S5H0vW7T4uS0Az2MUtPInw4i_EaME"
+BUCKET_NAME = "inventory"
+TEMP_DIR = "temp"
+
+# Create Supabase client
+supabase: Client = create_client(PROJECT_URL, ANON_KEY)
+os.makedirs(TEMP_DIR, exist_ok=True)
+
+# ===== CAPTURE IMAGE =====
+cap = cv2.VideoCapture(0)
+if not cap.isOpened():
+    print("? Error: Could not open camera.")
+    exit()
+
+ret, frame = cap.read()
+cap.release()
+
+if not ret:
+    print("? Error: Could not capture image.")
+    exit()
+
+# Generate unique filename
+filename = f"{uuid.uuid4()}.jpg"
+local_path = os.path.join(TEMP_DIR, filename)
+cv2.imwrite(local_path, frame)
+print(f"?? Image saved: {local_path}")
+
+# ===== GET ITEM DETAILS =====
+item_name = input("Enter item name (e.g., Milk): ").strip()
+item_price = float(input("Enter item price (e.g., 25.0): ").strip())
+
+# ===== UPLOAD TO SUPABASE STORAGE =====
+storage_path = f"images/{filename}"  # relative path in the bucket
+
+with open(local_path, "rb") as f:
+    res = supabase.storage.from_(BUCKET_NAME).upload(storage_path, f)
+
+# Handle upload result
+if hasattr(res, "error") and res.error:
+    print("? Error uploading image:", res.error)
+    exit()
+
+print("? Image uploaded successfully.")
+
+# ===== SAVE ITEM TO INVENTORY TABLE =====
+# Store image_urls as an ARRAY (important for matcher)
+data = {
+    "item_name": item_name,
+    "price": item_price,
+    "image_urls": [storage_path]  # ? MATCHER expects this format
+}
+
+insert_res = supabase.table("inventory").insert(data).execute()
+
+if insert_res.data:
+    print("? Item added to inventory successfully!")
+else:
+    print("? Failed to add item:", insert_res)
+
